@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- CONFIGURATION (Reads from Environment Variables with Fallback Defaults) ---
+# --- CONFIGURATION ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8906695052:AAHlgMP29P49Om-YhULNVWl7IAt0mlUDq_Y")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "8570946742"))  # Admin Chat ID
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@TRADER_RAJ10")  # Admin Username
@@ -146,14 +146,7 @@ async def edit_message_safe(chat_id: int, message_id: int, caption: str, reply_m
 
 
 def parse_inline_keyboard(text: str) -> InlineKeyboardMarkup | None:
-    """
-    Parse string input into InlineKeyboardMarkup.
-    Format examples:
-    Single button per line:
-      Button Text - https://example.com
-    Multiple buttons per line (separated by |):
-      Google - https://google.com | YouTube - https://youtube.com
-    """
+    """Parse input string into InlineKeyboardMarkup."""
     lines = text.strip().split("\n")
     keyboard = []
     for line in lines:
@@ -372,8 +365,15 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin Panel Dashboard."""
-    if update.effective_chat.id != ADMIN_CHAT_ID:
-        await update.message.reply_text("⛔ **Unauthorized Access.**")
+    user_chat_id = update.effective_chat.id
+
+    if user_chat_id != ADMIN_CHAT_ID:
+        await update.message.reply_text(
+            f"⛔ **Unauthorized Access.**\n\n"
+            f"Your Telegram Chat ID: `{user_chat_id}`\n"
+            f"Configured Admin ID: `{ADMIN_CHAT_ID}`",
+            parse_mode="Markdown",
+        )
         return
 
     users_count = len(get_all_users())
@@ -469,7 +469,6 @@ async def receive_broadcast_buttons(update: Update, context: ContextTypes.DEFAUL
 
     await update.message.reply_text("👆 **Above is a live preview of your broadcast message with buttons:**", parse_mode="Markdown")
 
-    # Send preview message with buttons attached
     await context.bot.copy_message(
         chat_id=admin_chat_id,
         from_chat_id=admin_chat_id,
@@ -576,7 +575,6 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         parse_mode="Markdown",
     )
 
-    # Clear user broadcast data
     context.user_data.pop("broadcast_msg_id", None)
     context.user_data.pop("broadcast_markup", None)
 
@@ -595,10 +593,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 def main():
-    # Initialize SQLite DB
     init_db()
 
-    # Start health check server thread for Render
+    # Start background HTTP server thread for Render health check
     threading.Thread(target=start_health_check_server, daemon=True).start()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -630,7 +627,12 @@ def main():
                 CallbackQueryHandler(cancel, pattern="^btn_cancel_broadcast$"),
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("admin", admin_panel),
+            CommandHandler("start", start),
+        ],
+        allow_reentry=True,  # Allows /admin and /start to interrupt any state
         per_message=False,
     )
 
