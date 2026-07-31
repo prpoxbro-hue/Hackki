@@ -36,6 +36,7 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@TRADER_RAJ10")  # Admin Username
 IMAGE_URL = "https://i.ibb.co/WNRQ6D1Z/IMG-20260730-203514-934.jpg"
 CHANNEL_LINK = "https://t.me/+ZHT3OOvGpt0wMDJk"
 REGISTER_LINK = "https://pari-pulse.com/Wnuh"
+WEBAPP_LINK = "https://ghostchannel.unaux.com/hak.html"
 PROMO_CODE = "S999"
 
 # Conversation states
@@ -322,7 +323,7 @@ async def process_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         [
             InlineKeyboardButton(
                 "🚀 Open Hack",
-                web_app=WebAppInfo(url=REGISTER_LINK),
+                web_app=WebAppInfo(url=WEBAPP_LINK),
             )
         ],
         [
@@ -516,7 +517,7 @@ async def skip_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await query.message.reply_text(
+    await update.message.reply_text(
         "⚡ **Ready to send?** Click confirm below to send this broadcast to all users.",
         parse_mode="Markdown",
         reply_markup=reply_markup,
