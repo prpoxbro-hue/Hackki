@@ -55,7 +55,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
 def start_health_check_server():
     """Start a lightweight web server so Render detects an active port."""
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     logger.info(f"Health check server running on port {port}")
     server.serve_forever()
@@ -91,7 +91,7 @@ def get_all_users():
     return [u[0] for u in users]
 
 
-# --- USER FLOW HANDLERS ---
+# --- HELPER FUNCTIONS ---
 
 async def send_photo_safe(chat_id: int, photo: str, caption: str, reply_markup=None, context=None):
     """Safely send photo with fallback to text message if photo fails."""
@@ -112,6 +112,31 @@ async def send_photo_safe(chat_id: int, photo: str, caption: str, reply_markup=N
             reply_markup=reply_markup,
         )
 
+
+async def edit_message_safe(chat_id: int, message_id: int, caption: str, reply_markup=None, context=None):
+    """Safely edit a message caption or text."""
+    try:
+        await context.bot.edit_message_caption(
+            chat_id=chat_id,
+            message_id=message_id,
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+    except Exception:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=caption,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to edit message: {e}")
+
+
+# --- USER FLOW HANDLERS ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Step 1: Save user ID and prompt for language selection."""
@@ -238,17 +263,14 @@ async def process_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
     await asyncio.sleep(2)
-    try:
-        await context.bot.edit_message_caption(
-            chat_id=status_msg.chat_id,
-            message_id=status_msg.message_id,
-            caption=f"⚡ **Processing Verification...**\n\n"
-                    f"ID: `{text}`\n"
-                    f"Status: `Analyzing parameters...` 🔄",
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        logger.warning(f"Failed to edit caption: {e}")
+    await edit_message_safe(
+        chat_id=status_msg.chat_id,
+        message_id=status_msg.message_id,
+        caption=f"⚡ **Processing Verification...**\n\n"
+                f"ID: `{text}`\n"
+                f"Status: `Analyzing parameters...` 🔄",
+        context=context,
+    )
 
     await asyncio.sleep(2)
 
@@ -266,26 +288,16 @@ async def process_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    try:
-        await context.bot.edit_message_caption(
-            chat_id=status_msg.chat_id,
-            message_id=status_msg.message_id,
-            caption=f"✅ **Verification & Analysis Complete!**\n\n"
-                    f"👤 **Account ID:** `{text}`\n"
-                    f"🟢 **Status:** Verified\n\n"
-                    f"All features are now unlocked. Select an option below:",
-            parse_mode="Markdown",
-            reply_markup=reply_markup,
-        )
-    except Exception:
-        await update.message.reply_text(
-            f"✅ **Verification & Analysis Complete!**\n\n"
-            f"👤 **Account ID:** `{text}`\n"
-            f"🟢 **Status:** Verified\n\n"
-            f"All features are now unlocked. Select an option below:",
-            parse_mode="Markdown",
-            reply_markup=reply_markup,
-        )
+    await edit_message_safe(
+        chat_id=status_msg.chat_id,
+        message_id=status_msg.message_id,
+        caption=f"✅ **Verification & Analysis Complete!**\n\n"
+                f"👤 **Account ID:** `{text}`\n"
+                f"🟢 **Status:** Verified\n\n"
+                f"All features are now unlocked. Select an option below:",
+        reply_markup=reply_markup,
+        context=context,
+    )
     return MAIN_MENU
 
 
@@ -349,7 +361,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif query.data == "admin_broadcast":
         await query.message.reply_text(
             "📢 **Broadcast Mode Active**\n\n"
-            "Send the message, photo, video, or link you want to send to all users.\n"
+            "Send the message, photo, video, or file you want to send to all users.\n"
             "Send `/cancel` to abort.",
             parse_mode="Markdown",
         )
@@ -380,7 +392,7 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 message_id=msg_id,
             )
             success += 1
-            await asyncio.sleep(0.05)  # Rate-limit safety delay
+            await asyncio.sleep(0.05)
         except Exception as e:
             logger.error(f"Failed to send broadcast to {u_id}: {e}")
             failed += 1
@@ -405,7 +417,7 @@ def main():
     # Initialize SQLite DB
     init_db()
 
-    # Start background HTTP server thread for Render health check
+    # Start health check server thread for Render
     threading.Thread(target=start_health_check_server, daemon=True).start()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -426,7 +438,7 @@ def main():
             MAIN_MENU: [CallbackQueryHandler(handle_main_menu)],
             AWAIT_BROADCAST: [
                 MessageHandler(
-                    (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.DOCUMENT) & ~filters.COMMAND,
+                    ~filters.COMMAND,
                     execute_broadcast,
                 )
             ],
