@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # --- CONFIGURATION ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8906695052:AAHlgMP29P49Om-YhULNVWl7IAt0mlUDq_Y")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "8570946742"))  # Admin Chat ID
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@TRADER_RAJ10")  # Admin Username
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@HACKKII")  # Admin Username
 
 IMAGE_URL = "https://i.ibb.co/WNRQ6D1Z/IMG-20260730-203514-934.jpg"
 CHANNEL_LINK = "https://t.me/+ZHT3OOvGpt0wMDJk"
