@@ -39,7 +39,16 @@ REGISTER_LINK = "https://pari-pulse.com/Wnuh"
 PROMO_CODE = "S999"
 
 # Conversation states
-SELECT_LANG, CHECK_JOIN, REGISTRATION_STEP, AWAIT_USER_ID, MAIN_MENU, AWAIT_BROADCAST = range(6)
+(
+    SELECT_LANG,
+    CHECK_JOIN,
+    REGISTRATION_STEP,
+    AWAIT_USER_ID,
+    MAIN_MENU,
+    AWAIT_BROADCAST,
+    AWAIT_BUTTONS,
+    CONFIRM_BROADCAST,
+) = range(8)
 
 
 # --- DUMMY HTTP SERVER FOR RENDER HEALTH CHECK ---
@@ -50,7 +59,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is live and running!")
 
     def log_message(self, format, *args):
-        return  # Silence HTTP server logs to keep terminal clean
+        return  # Silence HTTP server logs
 
 
 def start_health_check_server():
@@ -134,6 +143,48 @@ async def edit_message_safe(chat_id: int, message_id: int, caption: str, reply_m
             )
         except Exception as e:
             logger.warning(f"Failed to edit message: {e}")
+
+
+def parse_inline_keyboard(text: str) -> InlineKeyboardMarkup | None:
+    """
+    Parse string input into InlineKeyboardMarkup.
+    Format examples:
+    Single button per line:
+      Button Text - https://example.com
+    Multiple buttons per line (separated by |):
+      Google - https://google.com | YouTube - https://youtube.com
+    """
+    lines = text.strip().split("\n")
+    keyboard = []
+    for line in lines:
+        if not line.strip():
+            continue
+        row = []
+        parts = line.split("|")
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            split_item = None
+            for delim in [" - ", " -> ", " : "]:
+                if delim in part:
+                    split_item = part.split(delim, 1)
+                    break
+            if not split_item and "http" in part:
+                idx = part.find("http")
+                split_item = [part[:idx].strip(" -:"), part[idx:].strip()]
+
+            if split_item and len(split_item) == 2:
+                btn_text = split_item[0].strip()
+                btn_url = split_item[1].strip()
+                if not btn_url.startswith(("http://", "https://", "t.me/")):
+                    btn_url = "https://" + btn_url
+                if btn_text and btn_url:
+                    row.append(InlineKeyboardButton(text=btn_text, url=btn_url))
+        if row:
+            keyboard.append(row)
+
+    return InlineKeyboardMarkup(keyboard) if keyboard else None
 
 
 # --- USER FLOW HANDLERS ---
@@ -335,8 +386,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"👑 **Admin Panel**\n\n"
-        f"👤 **Admin:** {ADMIN_USERNAME}\n"
-        f"🆔 **Admin ID:** `{ADMIN_CHAT_ID}`\n"
+        f"👤 **Admin Username:** {ADMIN_USERNAME}\n"
+        f"🆔 **Admin Chat ID:** `{ADMIN_CHAT_ID}`\n"
         f"👥 **Total Registered Users:** `{users_count}`\n\n"
         f"Select an option below:",
         parse_mode="Markdown",
@@ -361,24 +412,143 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif query.data == "admin_broadcast":
         await query.message.reply_text(
             "📢 **Broadcast Mode Active**\n\n"
-            "Send the message, photo, video, or file you want to send to all users.\n"
+            "Please send the **Text, Photo, Video, Document, or File** you want to broadcast.\n\n"
             "Send `/cancel` to abort.",
             parse_mode="Markdown",
         )
         return AWAIT_BROADCAST
 
 
-async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Broadcast text, photos, videos, or links to all saved users."""
+async def receive_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Step 1 of Broadcast: Receive content and prompt for optional link buttons."""
     if update.effective_chat.id != ADMIN_CHAT_ID:
         return ConversationHandler.END
 
-    users = get_all_users()
-    admin_chat_id = update.effective_chat.id
-    msg_id = update.message.message_id
+    context.user_data["broadcast_msg_id"] = update.message.message_id
 
-    status_msg = await update.message.reply_text(
-        f"⏳ **Sending broadcast to {len(users)} users...**", parse_mode="Markdown"
+    keyboard = [
+        [InlineKeyboardButton("🚀 Send Without Buttons", callback_data="btn_skip_broadcast")],
+        [InlineKeyboardButton("❌ Cancel Broadcast", callback_data="btn_cancel_broadcast")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "🔘 **Step 2: Add Link Buttons (Optional)**\n\n"
+        "To add link buttons below your broadcast message, send them now in this format:\n"
+        "`Button Text - https://example.com`\n"
+        "`Button 1 - https://link1.com | Button 2 - https://link2.com`\n\n"
+        "Or click **'🚀 Send Without Buttons'** below.",
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
+    )
+    return AWAIT_BUTTONS
+
+
+async def receive_broadcast_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Step 2 of Broadcast: Receive button text and generate live preview."""
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return ConversationHandler.END
+
+    text = update.message.text.strip()
+    markup = parse_inline_keyboard(text)
+
+    if not markup:
+        await update.message.reply_text(
+            "❌ **Invalid Button Format!**\n\n"
+            "Please send buttons in this format:\n"
+            "`Button Text - https://link.com`\n"
+            "`Button 1 - https://link1.com | Button 2 - https://link2.com`\n\n"
+            "Or click **'🚀 Send Without Buttons'**.",
+            parse_mode="Markdown",
+        )
+        return AWAIT_BUTTONS
+
+    context.user_data["broadcast_markup"] = markup
+    admin_chat_id = update.effective_chat.id
+    msg_id = context.user_data.get("broadcast_msg_id")
+
+    await update.message.reply_text("👆 **Above is a live preview of your broadcast message with buttons:**", parse_mode="Markdown")
+
+    # Send preview message with buttons attached
+    await context.bot.copy_message(
+        chat_id=admin_chat_id,
+        from_chat_id=admin_chat_id,
+        message_id=msg_id,
+        reply_markup=markup,
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Confirm & Send Broadcast", callback_data="btn_confirm_broadcast")],
+        [InlineKeyboardButton("❌ Cancel Broadcast", callback_data="btn_cancel_broadcast")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "⚡ **Ready to send?** Click confirm below to send this broadcast to all users.",
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
+    )
+    return CONFIRM_BROADCAST
+
+
+async def skip_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Skip button addition and generate preview without buttons."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != ADMIN_CHAT_ID:
+        return ConversationHandler.END
+
+    context.user_data["broadcast_markup"] = None
+    admin_chat_id = update.effective_chat.id
+    msg_id = context.user_data.get("broadcast_msg_id")
+
+    await query.message.reply_text("👆 **Broadcast Preview (Without Buttons):**", parse_mode="Markdown")
+
+    await context.bot.copy_message(
+        chat_id=admin_chat_id,
+        from_chat_id=admin_chat_id,
+        message_id=msg_id,
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Confirm & Send Broadcast", callback_data="btn_confirm_broadcast")],
+        [InlineKeyboardButton("❌ Cancel Broadcast", callback_data="btn_cancel_broadcast")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.message.reply_text(
+        "⚡ **Ready to send?** Click confirm below to send this broadcast to all users.",
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
+    )
+    return CONFIRM_BROADCAST
+
+
+async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Broadcast message + link buttons to all saved users."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+        chat_id = query.message.chat_id
+    else:
+        chat_id = update.effective_chat.id
+
+    if chat_id != ADMIN_CHAT_ID:
+        return ConversationHandler.END
+
+    msg_id = context.user_data.get("broadcast_msg_id")
+    markup = context.user_data.get("broadcast_markup")
+    users = get_all_users()
+
+    if not msg_id:
+        await context.bot.send_message(chat_id=chat_id, text="❌ Broadcast message not found.")
+        return ConversationHandler.END
+
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"⏳ **Sending broadcast to {len(users)} users...**",
+        parse_mode="Markdown",
     )
 
     success = 0
@@ -388,8 +558,9 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         try:
             await context.bot.copy_message(
                 chat_id=u_id,
-                from_chat_id=admin_chat_id,
+                from_chat_id=chat_id,
                 message_id=msg_id,
+                reply_markup=markup,
             )
             success += 1
             await asyncio.sleep(0.05)
@@ -404,12 +575,22 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"🔴 **Failed / Blocked:** {failed}",
         parse_mode="Markdown",
     )
+
+    # Clear user broadcast data
+    context.user_data.pop("broadcast_msg_id", None)
+    context.user_data.pop("broadcast_markup", None)
+
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancel active conversation."""
-    await update.message.reply_text("Action cancelled. Send /start to restart.")
+    query = update.callback_query
+    if query:
+        await query.answer()
+        await query.message.reply_text("Action cancelled.")
+    else:
+        await update.message.reply_text("Action cancelled. Send /start to restart.")
     return ConversationHandler.END
 
 
@@ -437,10 +618,16 @@ def main():
             AWAIT_USER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_user_id)],
             MAIN_MENU: [CallbackQueryHandler(handle_main_menu)],
             AWAIT_BROADCAST: [
-                MessageHandler(
-                    ~filters.COMMAND,
-                    execute_broadcast,
-                )
+                MessageHandler(~filters.COMMAND, receive_broadcast_content)
+            ],
+            AWAIT_BUTTONS: [
+                CallbackQueryHandler(skip_buttons_callback, pattern="^btn_skip_broadcast$"),
+                CallbackQueryHandler(cancel, pattern="^btn_cancel_broadcast$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_broadcast_buttons),
+            ],
+            CONFIRM_BROADCAST: [
+                CallbackQueryHandler(execute_broadcast, pattern="^btn_confirm_broadcast$"),
+                CallbackQueryHandler(cancel, pattern="^btn_cancel_broadcast$"),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
