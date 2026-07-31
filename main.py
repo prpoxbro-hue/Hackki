@@ -1,7 +1,11 @@
+import os
 import re
 import asyncio
 import logging
 import sqlite3
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -24,10 +28,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- CONFIGURATION ---
-BOT_TOKEN = "8906695052:AAHlgMP29P49Om-YhULNVWl7IAt0mlUDq_Y"
-ADMIN_CHAT_ID = 8570946742  # Admin Chat ID
-ADMIN_USERNAME = "@TRADER_RAJ10"  # Admin Username
+# --- CONFIGURATION (Reads from Environment Variables with Fallback Defaults) ---
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8906695052:AAHlgMP29P49Om-YhULNVWl7IAt0mlUDq_Y")
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "8570946742"))  # Admin Chat ID
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@TRADER_RAJ10")  # Admin Username
 
 IMAGE_URL = "https://i.ibb.co/WNRQ6D1Z/IMG-20260730-203514-934.jpg"
 CHANNEL_LINK = "https://t.me/+ZHT3OOvGpt0wMDJk"
@@ -36,6 +40,25 @@ PROMO_CODE = "S999"
 
 # Conversation states
 SELECT_LANG, CHECK_JOIN, REGISTRATION_STEP, AWAIT_USER_ID, MAIN_MENU, AWAIT_BROADCAST = range(6)
+
+
+# --- DUMMY HTTP SERVER FOR RENDER HEALTH CHECK ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is live and running!")
+
+    def log_message(self, format, *args):
+        return  # Silence HTTP server logs to keep terminal clean
+
+
+def start_health_check_server():
+    """Start a lightweight web server so Render detects an active port."""
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logger.info(f"Health check server running on port {port}")
+    server.serve_forever()
 
 
 # --- DATABASE FUNCTIONS ---
@@ -70,10 +93,30 @@ def get_all_users():
 
 # --- USER FLOW HANDLERS ---
 
+async def send_photo_safe(chat_id: int, photo: str, caption: str, reply_markup=None, context=None):
+    """Safely send photo with fallback to text message if photo fails."""
+    try:
+        return await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=photo,
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+    except Exception as e:
+        logger.warning(f"Could not send photo, falling back to text: {e}")
+        return await context.bot.send_message(
+            chat_id=chat_id,
+            text=caption,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Step 1: Save user ID and prompt for language selection."""
     chat_id = update.effective_chat.id
-    add_user(chat_id)  # Record user in database
+    add_user(chat_id)
 
     keyboard = [
         [
@@ -87,11 +130,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_photo(
+    await send_photo_safe(
+        chat_id=chat_id,
         photo=IMAGE_URL,
         caption="👋 **Welcome!** Please select your preferred language:",
-        parse_mode="Markdown",
         reply_markup=reply_markup,
+        context=context,
     )
     return SELECT_LANG
 
@@ -107,12 +151,20 @@ async def language_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await query.edit_message_caption(
-        caption="⚠️ **Step 1: Join Channel**\n\n"
-                "You must join our official Telegram channel to proceed.",
-        parse_mode="Markdown",
-        reply_markup=reply_markup,
-    )
+    try:
+        await query.edit_message_caption(
+            caption="⚠️ **Step 1: Join Channel**\n\n"
+                    "You must join our official Telegram channel to proceed.",
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+    except Exception:
+        await query.message.reply_text(
+            "⚠️ **Step 1: Join Channel**\n\n"
+            "You must join our official Telegram channel to proceed.",
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
     return CHECK_JOIN
 
 
@@ -134,12 +186,12 @@ async def channel_verified(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"2. If you already registered, click **'I Have Pre-Registered'** to submit your ID."
     )
 
-    await context.bot.send_photo(
+    await send_photo_safe(
         chat_id=query.message.chat_id,
         photo=IMAGE_URL,
         caption=caption_text,
-        parse_mode="Markdown",
         reply_markup=reply_markup,
+        context=context,
     )
     return REGISTRATION_STEP
 
@@ -149,11 +201,12 @@ async def prompt_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer()
 
-    await query.message.reply_photo(
+    await send_photo_safe(
+        chat_id=query.message.chat_id,
         photo=IMAGE_URL,
         caption="🔢 **Enter Your User ID**\n\n"
                 "Please send your **10-digit Account ID** here in the chat to proceed.",
-        parse_mode="Markdown",
+        context=context,
     )
     return AWAIT_USER_ID
 
@@ -161,35 +214,41 @@ async def prompt_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def process_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Step 5: Process and analyze 10-digit ID, then open options."""
     text = update.message.text.strip()
+    chat_id = update.effective_chat.id
 
     if not re.match(r"^\d{10}$", text):
-        await update.message.reply_photo(
+        await send_photo_safe(
+            chat_id=chat_id,
             photo=IMAGE_URL,
             caption="❌ **Invalid Format!**\n\n"
                     "Please enter a valid **10-digit numerical** User ID.",
-            parse_mode="Markdown",
+            context=context,
         )
         return AWAIT_USER_ID
 
     context.user_data["account_id"] = text
 
-    status_msg = await update.message.reply_photo(
+    status_msg = await send_photo_safe(
+        chat_id=chat_id,
         photo=IMAGE_URL,
         caption=f"🔍 **Analyzing Account Data...**\n\n"
                 f"ID: `{text}`\n"
                 f"Status: `Connecting to database...` ⏳",
-        parse_mode="Markdown",
+        context=context,
     )
 
     await asyncio.sleep(2)
-    await context.bot.edit_message_caption(
-        chat_id=status_msg.chat_id,
-        message_id=status_msg.message_id,
-        caption=f"⚡ **Processing Verification...**\n\n"
-                f"ID: `{text}`\n"
-                f"Status: `Analyzing parameters...` 🔄",
-        parse_mode="Markdown",
-    )
+    try:
+        await context.bot.edit_message_caption(
+            chat_id=status_msg.chat_id,
+            message_id=status_msg.message_id,
+            caption=f"⚡ **Processing Verification...**\n\n"
+                    f"ID: `{text}`\n"
+                    f"Status: `Analyzing parameters...` 🔄",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to edit caption: {e}")
 
     await asyncio.sleep(2)
 
@@ -207,16 +266,26 @@ async def process_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await context.bot.edit_message_caption(
-        chat_id=status_msg.chat_id,
-        message_id=status_msg.message_id,
-        caption=f"✅ **Verification & Analysis Complete!**\n\n"
-                f"👤 **Account ID:** `{text}`\n"
-                f"🟢 **Status:** Verified\n\n"
-                f"All features are now unlocked. Select an option below:",
-        parse_mode="Markdown",
-        reply_markup=reply_markup,
-    )
+    try:
+        await context.bot.edit_message_caption(
+            chat_id=status_msg.chat_id,
+            message_id=status_msg.message_id,
+            caption=f"✅ **Verification & Analysis Complete!**\n\n"
+                    f"👤 **Account ID:** `{text}`\n"
+                    f"🟢 **Status:** Verified\n\n"
+                    f"All features are now unlocked. Select an option below:",
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+    except Exception:
+        await update.message.reply_text(
+            f"✅ **Verification & Analysis Complete!**\n\n"
+            f"👤 **Account ID:** `{text}`\n"
+            f"🟢 **Status:** Verified\n\n"
+            f"All features are now unlocked. Select an option below:",
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
     return MAIN_MENU
 
 
@@ -296,21 +365,22 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     admin_chat_id = update.effective_chat.id
     msg_id = update.message.message_id
 
-    status_msg = await update.message.reply_text(f"⏳ **Sending broadcast to {len(users)} users...**", parse_mode="Markdown")
+    status_msg = await update.message.reply_text(
+        f"⏳ **Sending broadcast to {len(users)} users...**", parse_mode="Markdown"
+    )
 
     success = 0
     failed = 0
 
     for u_id in users:
         try:
-            # Native copy_message supports photos, videos, captions, links, and formatting
             await context.bot.copy_message(
                 chat_id=u_id,
                 from_chat_id=admin_chat_id,
                 message_id=msg_id,
             )
             success += 1
-            await asyncio.sleep(0.05)  # Prevent rate limits
+            await asyncio.sleep(0.05)  # Rate-limit safety delay
         except Exception as e:
             logger.error(f"Failed to send broadcast to {u_id}: {e}")
             failed += 1
@@ -334,6 +404,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 def main():
     # Initialize SQLite DB
     init_db()
+
+    # Start background HTTP server thread for Render health check
+    threading.Thread(target=start_health_check_server, daemon=True).start()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -362,7 +435,6 @@ def main():
         per_message=False,
     )
 
-    app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(conv_handler)
 
     print("Bot is running...")
